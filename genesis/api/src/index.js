@@ -1,0 +1,37 @@
+import 'dotenv/config';
+import http from 'node:http';
+import express from 'express';
+import cors from 'cors';
+import mongoose from 'mongoose';
+import { Server } from 'socket.io';
+import jwt from 'jsonwebtoken';
+import { log } from './logger.js';
+import { authRouter } from './routes/auth.js';
+import { User, Workspace } from './models.js';
+import { workspaceRouter } from './routes/workspaces.js';
+import { runRouter } from './routes/runs.js';
+import './jobs/queue.js';
+import { configureScheduler } from './jobs/scheduler.js';
+import { financialRouter } from './routes/financials.js';
+import { competitorRouter } from './routes/competitors.js';
+import { configureGoogleOAuth } from './oauth.js';
+
+const app = express(); const server = http.createServer(app);
+const defaultOrigins = ['http://localhost:5180', 'http://127.0.0.1:5180'];
+const configuredOrigins = (process.env.WEB_ORIGIN || 'http://localhost:5180').split(',').map((origin) => origin.trim()).filter(Boolean);
+const allowedOrigins = [...new Set([...defaultOrigins, ...configuredOrigins])];
+const allowOrigin = (origin) => !origin || allowedOrigins.includes(origin);
+const corsOptions = { origin: (origin, callback) => { if (allowOrigin(origin)) return callback(null, true); callback(new Error('Origin not allowed by CORS')); }, credentials: true };
+const io = new Server(server, { cors: { origin: allowedOrigins, credentials: true } });
+app.use(cors(corsOptions)); app.use(express.json({ limit: '1mb' }));
+app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'api' }));
+configureGoogleOAuth(app);
+app.use('/api/auth', authRouter); app.use('/api/workspaces', workspaceRouter); app.use('/api/runs', runRouter);
+app.use('/api', financialRouter(io)); app.use('/api', competitorRouter);
+app.post('/internal/agent-events', async (req, res, next) => { try { const { runId, event } = req.body; if (!runId || !event) return res.status(400).json({ error: 'runId and event required' }); const { AgentRun } = await import('./models.js'); const run = await AgentRun.findById(runId); if (!run) return res.status(404).json({ error: 'Run not found' }); if (event.type === 'alert') { const { createAlert } = await import('./services/alerts.js'); await createAlert(io, { workspaceId: run.workspaceId, dedupeKey: event.dedupeKey, category: event.category, severity: event.severity, title: event.title, body: event.body, metadata: event.metadata }); } else io.to(`workspace:${run.workspaceId}`).emit('agent:progress', { runId, ...event }); res.status(202).json({ ok: true }); } catch (error) { next(error); } });
+app.use((err, _req, res, _next) => { log('api', 'error', 'request_failed', { error: err.message }); res.status(err.name === 'ZodError' ? 400 : 500).json({ error: err.name === 'ZodError' ? 'Invalid request' : 'Internal server error', details: err.issues }); });
+io.use(async (socket, next) => { try { const token = socket.handshake.auth?.token; const payload = jwt.verify(token, process.env.JWT_SECRET || 'development-only-secret'); socket.user = await User.findById(payload.sub); if (!socket.user) throw new Error('Unknown user'); next(); } catch { next(new Error('Authentication required')); } });
+io.on('connection', (socket) => socket.on('workspace:join', async (workspaceId) => { const workspace = await Workspace.findOne({ _id: workspaceId, 'members.userId': socket.user._id }); if (workspace) socket.join(`workspace:${workspaceId}`); }));
+export { app, io };
+async function boot() { await mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/genesis'); await configureScheduler(); server.listen(process.env.API_PORT || 3001, () => log('api', 'info', 'listening', { port: process.env.API_PORT || 3001 })); }
+boot().catch((err) => { log('api', 'error', 'boot_failed', { error: err.message }); process.exit(1); });
