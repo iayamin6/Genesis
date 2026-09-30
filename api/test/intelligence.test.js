@@ -1,0 +1,137 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { snapshotSchema } from '../src/intelligence/contract.js';
+import { analyzeCompany, measureOutcome } from '../src/intelligence/engine.js';
+export function fixture() {
+  return {
+    importKey: 'test-1',
+    observedAt: '2026-09-08T08:00:00.000Z',
+    source: { kind: 'sample', name: 'Synthetic test' },
+    currency: 'USD',
+    teams: [{ id: 'eng', name: 'Engineering' }],
+    employees: [{ id: 'a', name: 'Alex', teamId: 'eng', capacityHours: 40, allocatedHours: 54 }],
+    projects: [
+      {
+        id: 'alpha',
+        name: 'Alpha',
+        teamId: 'eng',
+        ownerIds: ['a'],
+        dueDate: '2026-08-23',
+        completion: 60,
+      },
+    ],
+    products: [{ id: 'p', name: 'Platform' }],
+    features: [
+      { id: 'f', name: 'Sync', projectId: 'alpha', productId: 'p' },
+      { id: 'f2', name: 'Export', projectId: 'alpha', productId: 'p' },
+    ],
+    customers: [
+      {
+        id: 'c',
+        name: 'Acme',
+        featureIds: ['f', 'f2'],
+        arrMinor: 8300000,
+        renewalDate: '2026-10-23',
+        openSupportIssues: 7,
+      },
+    ],
+  };
+}
+test('connected risk traverses both feature paths but counts customer ARR once', () => {
+  const result = analyzeCompany(snapshotSchema.parse(fixture()));
+  assert.equal(result.risks[0].paths.length, 2);
+  assert.equal(result.summary.exposedArrMinor, 8300000);
+  assert.equal(result.risks[0].evidence.delayDays, 16);
+  assert.equal(result.risks[0].evidence.renewalsWithin45Days, 1);
+  assert.equal(result.risks[0].severity, 'critical');
+  assert.equal(result.risks[0].evidence.workloadChangePct, null);
+});
+test('baseline provides workload change and support change', () => {
+  const before = fixture();
+  before.observedAt = '2026-09-01T08:00:00.000Z';
+  before.employees[0].allocatedHours = 40;
+  before.customers[0].openSupportIssues = 5;
+  const risk = analyzeCompany(fixture(), before).risks[0];
+  assert.equal(risk.evidence.workloadChangePct, 35);
+  assert.equal(risk.evidence.supportChangePct, 40);
+});
+test('completed or on-time projects and available capacity do not trigger connected risk', () => {
+  for (const change of [
+    (s) => (s.projects[0].completion = 100),
+    (s) => (s.projects[0].dueDate = '2026-09-08'),
+    (s) => (s.employees[0].allocatedHours = 40),
+  ]) {
+    const s = fixture();
+    change(s);
+    assert.equal(analyzeCompany(s).risks.length, 0);
+  }
+});
+test('zero capacity is a finite, deterministic overload', () => {
+  const s = fixture();
+  s.employees[0].capacityHours = 0;
+  assert.equal(analyzeCompany(s).risks[0].evidence.capacityHours, 0);
+});
+test('renewals outside the inclusive 45-day window are excluded', () => {
+  for (const date of ['2026-09-07', '2026-10-24']) {
+    const s = fixture();
+    s.customers[0].renewalDate = date;
+    assert.equal(analyzeCompany(s).risks[0].evidence.renewalsWithin45Days, 0);
+  }
+});
+test('summary deduplicates customer exposure across projects', () => {
+  const s = fixture();
+  s.projects.push({ ...s.projects[0], id: 'beta' });
+  s.features[1].projectId = 'beta';
+  const result = analyzeCompany(s);
+  assert.equal(result.risks.length, 2);
+  assert.equal(result.summary.exposedArrMinor, 8300000);
+});
+test('invalid relationships, duplicate IDs, dates and amounts fail validation', () => {
+  for (const change of [
+    (s) => (s.employees[0].teamId = 'missing'),
+    (s) => (s.features[0].projectId = 'missing'),
+    (s) => s.customers[0].featureIds.push('missing'),
+    (s) => s.teams.push(s.teams[0]),
+    (s) => (s.projects[0].dueDate = '2026-02-30'),
+    (s) => (s.customers[0].arrMinor = -1),
+    (s) => (s.customers[0].arrMinor = 1.1),
+    (s) => (s.employees[0].allocatedHours = Infinity),
+    (s) => s.projects[0].ownerIds.push('missing'),
+  ]) {
+    const s = fixture();
+    change(s);
+    assert.equal(snapshotSchema.safeParse(s).success, false);
+  }
+});
+test('outcomes require later data and do not mistake missing dependencies for recovery', () => {
+  const s = fixture(),
+    risk = analyzeCompany(s).risks[0];
+  const action = {
+    riskKey: risk.key,
+    baseline: risk.evidence,
+    baselineObservedAt: s.observedAt,
+    customerIds: ['c'],
+  };
+  const latest = { snapshot: s, analysis: analyzeCompany(s) };
+  assert.equal(measureOutcome(action, latest).status, 'awaiting_observation');
+  s.observedAt = '2026-09-09T08:00:00.000Z';
+  latest.analysis = analyzeCompany(s);
+  assert.equal(measureOutcome(action, latest).status, 'risk_persists');
+  s.projects[0].completion = 100;
+  latest.analysis = analyzeCompany(s);
+  assert.equal(measureOutcome(action, latest).status, 'rule_cleared');
+  s.customers[0].featureIds = [];
+  assert.equal(measureOutcome(action, latest).status, 'unknown');
+});
+
+test('delivery-only updates do not invent fresh workload measurements', () => {
+  const before = fixture();
+  const current = fixture();
+  current.observedAt = '2026-09-09T08:00:00.000Z';
+  current.domainsObservedAt = {
+    customers: before.observedAt,
+    capacity: before.observedAt,
+    delivery: current.observedAt,
+  };
+  assert.equal(analyzeCompany(current, before).risks[0].evidence.workloadChangePct, null);
+});

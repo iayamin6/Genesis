@@ -1,0 +1,29 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Dependencies and generated output
+node_modules/
+dist/
+coverage/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime data, databases, logs, and backups
+data/
+backups/
+*.log
+*.db
+*.sqlite*
+
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

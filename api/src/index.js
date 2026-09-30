@@ -1,0 +1,163 @@
+import { auditWrites } from './audit.js';
+import { validateProductionConfig, rateLimit, wrapRouter, safeEqual } from './security.js';
+import { ingestionRouter } from './routes/extended.js';
+import 'dotenv/config';
+import http from 'node:http';
+import express from 'express';
+import cors from 'cors';
+import mongoose from 'mongoose';
+import { Server } from 'socket.io';
+import jwt from 'jsonwebtoken';
+import { log } from './logger.js';
+import { authRouter } from './routes/auth.js';
+import { User, Workspace } from './models.js';
+import { workspaceRouter } from './routes/workspaces.js';
+import { runRouter } from './routes/runs.js';
+import './jobs/queue.js';
+import { configureScheduler } from './jobs/scheduler.js';
+import { financialRouter } from './routes/financials.js';
+import { competitorRouter } from './routes/competitors.js';
+import { intelligenceRouter } from './routes/intelligence.js';
+import { configureGoogleOAuth } from './oauth.js';
+
+validateProductionConfig();
+const app = express();
+const server = http.createServer(app);
+const defaultOrigins =
+  process.env.NODE_ENV === 'production' ? [] : ['http://localhost:5180', 'http://127.0.0.1:5180'];
+const configuredOrigins = (process.env.WEB_ORIGIN || 'http://localhost:5180')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const allowedOrigins = [...new Set([...defaultOrigins, ...configuredOrigins])];
+const allowOrigin = (origin) => !origin || allowedOrigins.includes(origin);
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (allowOrigin(origin)) return callback(null, true);
+    callback(new Error('Origin not allowed by CORS'));
+  },
+  credentials: true,
+};
+const io = new Server(server, { cors: { origin: allowedOrigins, credentials: true } });
+app.disable('x-powered-by');
+app.set('query parser', 'simple');
+app.use((_req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Cache-Control': 'no-store',
+  });
+  next();
+});
+app.use(rateLimit(300));
+app.use(auditWrites);
+app.use('/api/auth', rateLimit(20));
+app.use(cors(corsOptions));
+app.use(express.json({ limit: '1mb' }));
+app.get('/ready', (_req, res) =>
+  res
+    .status(mongoose.connection.readyState === 1 ? 200 : 503)
+    .json({ database: mongoose.connection.readyState === 1 ? 'connected' : 'unavailable' }),
+);
+app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'api' }));
+app.use(wrapRouter(ingestionRouter));
+configureGoogleOAuth(app);
+app.use('/api/auth', wrapRouter(authRouter));
+app.use('/api/workspaces', wrapRouter(workspaceRouter));
+app.use('/api/runs', wrapRouter(runRouter));
+app.use('/api', wrapRouter(intelligenceRouter));
+app.use('/api', wrapRouter(financialRouter(io)));
+app.use('/api', wrapRouter(competitorRouter));
+app.post('/internal/agent-events', async (req, res, next) => {
+  try {
+    if (
+      !process.env.INTERNAL_API_TOKEN ||
+      !safeEqual(req.get('X-Internal-Token'), process.env.INTERNAL_API_TOKEN)
+    )
+      return res.status(401).json({ error: 'Internal authentication required' });
+    const { runId, event } = req.body;
+    if (!runId || !event) return res.status(400).json({ error: 'runId and event required' });
+    const { AgentRun } = await import('./models.js');
+    const run = await AgentRun.findById(runId);
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    if (event.type === 'alert') {
+      const { createAlert } = await import('./services/alerts.js');
+      await createAlert(io, {
+        workspaceId: run.workspaceId,
+        dedupeKey: event.dedupeKey,
+        category: event.category,
+        severity: event.severity,
+        title: event.title,
+        body: event.body,
+        metadata: event.metadata,
+      });
+    } else io.to(`workspace:${run.workspaceId}`).emit('agent:progress', { runId, ...event });
+    res.status(202).json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+app.use((err, _req, res, _next) => {
+  log('api', 'error', 'request_failed', { error: err.message });
+  res
+    .status(err.status || (['ZodError', 'CastError'].includes(err.name) ? 400 : 500))
+    .json({
+      error:
+        err.name === 'ZodError'
+          ? 'Invalid request'
+          : err.status
+            ? err.message
+            : 'Internal server error',
+      details: err.issues,
+    });
+});
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
+    const payload = jwt.verify(token, process.env.JWT_SECRET || 'development-only-secret', {
+      algorithms: ['HS256'],
+    });
+    socket.user = await User.findById(payload.sub);
+    if (!socket.user) throw new Error('Unknown user');
+    next();
+  } catch {
+    next(new Error('Authentication required'));
+  }
+});
+io.on('connection', (socket) =>
+  socket.on('workspace:join', async (workspaceId) => {
+    if (!mongoose.isValidObjectId(workspaceId)) return;
+    try {
+      const workspace = await Workspace.findOne({
+        _id: workspaceId,
+        'members.userId': socket.user._id,
+      });
+      if (workspace) socket.join(`workspace:${workspaceId}`);
+    } catch {
+      socket.emit('workspace:error', { error: 'Workspace unavailable' });
+    }
+  }),
+);
+export { app, io };
+async function boot() {
+  await mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/genesis');
+  configureScheduler().catch((error) =>
+    log('api', 'warn', 'scheduler_unavailable', { error: error.message }),
+  );
+  server.listen(process.env.API_PORT || 3001, () =>
+    log('api', 'info', 'listening', { port: process.env.API_PORT || 3001 }),
+  );
+}
+boot().catch((err) => {
+  log('api', 'error', 'boot_failed', { error: err.message });
+  process.exit(1);
+});
+
+async function shutdown() {
+  server.close();
+  const { agentQueue } = await import('./jobs/queue.js');
+  await agentQueue?.close();
+  await mongoose.disconnect();
+  process.exit(0);
+}
+process.once('SIGTERM', shutdown);
