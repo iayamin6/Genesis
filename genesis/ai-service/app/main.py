@@ -1,7 +1,8 @@
 from __future__ import annotations
 import os
+import secrets
 from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from pymongo import MongoClient
 from .graph import build_graph
@@ -31,16 +32,18 @@ async def competitor_digest(document, request: RunRequest):
     for competitor in request.competitors:
         await emit_event(request.runId, {"type": "agent_started", "agent": f"competitor:{competitor.name}"})
         sources = await search_provider().search(f"{competitor.name} pricing jobs hiring {competitor.url or ''}")
+        if not sources:
+            output.append({"competitor": competitor.name, "status": "skipped", "notice": "No search evidence available; no market change inferred."})
+            await emit_event(request.runId, {"type": "agent_finished", "agent": f"competitor:{competitor.name}", "status": "skipped", "output": {"notice": "No search evidence"}})
+            continue
         prompt = f"Summarize only evidenced competitor signals in the requested schema. Unknown information must say unknown. Competitor: {competitor.name}. Evidence: {sources}"
         try: snapshot, usage = await llm_provider().structured(prompt, CompetitorSnapshot); status = "completed"
         except Exception as exc: snapshot, usage, status = {"pricing": "unknown", "hiring": "unknown", "summary": f"Search/provider failure: {exc}"}, {"inputTokens": 0, "outputTokens": 0}, "failed"
         diff = snapshot_diff(competitor.lastSnapshot, snapshot)
-        output.append({"competitor": competitor.name, "snapshot": snapshot, "diff": diff, "usage": usage, "status": status})
+        output.append({"competitor": competitor.name, "snapshot": snapshot, "diff": diff, "usage": usage, "status": status, "sources": sources, "verification": "unverified research summary"})
         mongo.get_default_database().workspaces.update_one({"_id": document["workspaceId"], "competitors._id": __import__('bson').ObjectId(competitor.id)}, {"$set": {"competitors.$.lastSnapshot": snapshot, "competitors.$.lastCheckedAt": datetime.now(timezone.utc)}})
-        if diff["significant"]:
-            for change in diff["changes"]:
-                if change["field"] not in {"pricing", "hiring"}: continue
-                await emit_event(request.runId, {"type": "alert", "category": "competitor", "severity": "warning" if change["field"] == "hiring" else "info", "dedupeKey": f"competitor:{document['workspaceId']}:{competitor.id}:{datetime.now(timezone.utc).date()}:{change['field']}", "title": f"{competitor.name} changed {change['field']}", "body": f"Previous: {change['before'][:240]} New: {change['after'][:240]}", "metadata": {"competitor": competitor.name, "change": change}})
+        # Textual research differences are not verified pricing/hiring facts.
+        # Cross-company market risk uses user-recorded sourced observations in the API.
         await emit_event(request.runId, {"type": "agent_finished", "agent": f"competitor:{competitor.name}", "status": status, "output": {"diff": diff}, "usage": usage})
     return output
 
@@ -48,7 +51,10 @@ async def competitor_digest(document, request: RunRequest):
 def health(): return {"status": "ok", "service": "ai-service"}
 
 @app.post('/runs/{run_id}')
-async def execute(run_id: str, request: RunRequest):
+async def execute(run_id: str, request: RunRequest, x_internal_token: str = Header(default="")):
+    expected = os.getenv("INTERNAL_API_TOKEN", "")
+    if not expected or not secrets.compare_digest(expected, x_internal_token): raise HTTPException(401, "Internal authentication required")
+    if run_id != request.runId: raise HTTPException(400, "Run ID mismatch")
     document = runs.find_one({"_id": __import__('bson').ObjectId(run_id)})
     if not document: raise HTTPException(404, "Run not found")
     if document.get("status") == "completed": return {"status": "already_completed"}

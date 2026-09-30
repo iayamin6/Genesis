@@ -2,7 +2,7 @@ import Queue from 'bull';
 import axios from 'axios';
 import { AgentRun, Workspace } from '../models.js';
 import { log } from '../logger.js';
-import { dispatchDaily } from './scheduler.js';
+import { dispatchDaily, dispatchCompany } from './scheduler.js';
 import { storeRunArtifact } from '../storage.js';
 
 let agentQueue;
@@ -10,6 +10,7 @@ let agentQueue;
 try {
   agentQueue = new Queue('agent-runs', process.env.REDIS_URL || 'redis://localhost:6379');
   agentQueue.process(3, async (job) => {
+    if (job.data.type === 'company-dispatch') return dispatchCompany();
     if (job.data.type === 'daily-dispatch') return dispatchDaily();
     const run = await AgentRun.findById(job.data.runId);
     if (!run || ['completed', 'partial'].includes(run.status)) return { skipped: true };
@@ -25,7 +26,7 @@ try {
           industry: workspace.industry || '',
           competitors: workspace.competitors.map((c) => ({ id: c._id.toString(), name: c.name, url: c.url, lastSnapshot: c.lastSnapshot })),
         },
-        { timeout: 185000 },
+        { timeout: 185000, headers: { 'X-Internal-Token': process.env.INTERNAL_API_TOKEN || '' } },
       );
       const artifact = await storeRunArtifact(run.id, response.data);
       if (artifact) await AgentRun.findByIdAndUpdate(run.id, { $push: { artifacts: artifact } });
@@ -37,7 +38,7 @@ try {
   });
 
   agentQueue.on('failed', async (job, error) => {
-    if (job.attemptsMade >= (job.opts.attempts || 1)) {
+    if (job.data.runId && job.attemptsMade >= (job.opts.attempts || 1)) {
       await AgentRun.findByIdAndUpdate(job.data.runId, { status: 'failed', error: error.message });
     }
   });

@@ -1,5 +1,4 @@
 import os, hashlib, math
-import chromadb
 
 SEED_DOCUMENTS = [
     ("unit-economics", "Unit economics: contribution margin equals revenue minus variable costs. Model assumptions explicitly and distinguish gross from net burn."),
@@ -9,22 +8,11 @@ SEED_DOCUMENTS = [
 ]
 
 class KnowledgeBase:
-    def __init__(self):
-        self.client = chromadb.PersistentClient(path=os.getenv("CHROMA_PATH", "/tmp/genesis-chroma"))
-        self.collection = self.client.get_or_create_collection("genesis-frameworks")
-        if not self.collection.count():
-            self.collection.add(ids=[x[0] for x in SEED_DOCUMENTS], documents=[x[1] for x in SEED_DOCUMENTS], embeddings=[self._embed(x[1]) for x in SEED_DOCUMENTS])
-    @staticmethod
-    def _embed(text: str) -> list[float]:
-        """Small deterministic embedding keeps the knowledge base fully self-hosted/offline.
-        A local sentence-transformer can replace this at the collection boundary later.
-        """
-        raw = hashlib.sha512(text.lower().encode()).digest()
-        vector = [(byte - 127.5) / 127.5 for byte in raw]
-        scale = math.sqrt(sum(x * x for x in vector)) or 1
-        return [x / scale for x in vector]
+    """Explicit lexical retrieval over framework documents; no fake semantic vectors."""
     def retrieve(self, query: str, n: int = 3) -> list[str]:
-        result = self.collection.query(query_embeddings=[self._embed(query)], n_results=n)
-        return result.get("documents", [[]])[0]
+        import re
+        terms = set(re.findall(r"\w+", query.lower()))
+        scored = [(len(terms & set(re.findall(r"\w+", document.lower()))), document) for _, document in SEED_DOCUMENTS]
+        return [document for score, document in sorted(scored, reverse=True)[:n] if score > 0]
 
 knowledge_base = KnowledgeBase()

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { User } from '../models.js';
 import { comparePassword, hashPassword, tokenFor } from '../auth.js';
 
-const credentials = z.object({ email: z.string().email(), password: z.string().min(8), name: z.string().min(1).max(120).optional() });
+const credentials = z.object({ email: z.string().trim().toLowerCase().email(), password: z.string().min(8).max(72).refine(v => Buffer.byteLength(v, 'utf8') <= 72, 'Password must be at most 72 UTF-8 bytes'), name: z.string().min(1).max(120).optional() });
 export const authRouter = Router();
 authRouter.post('/register', async (req, res, next) => { try {
   const input = credentials.parse(req.body);

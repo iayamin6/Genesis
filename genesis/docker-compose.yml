@@ -2,7 +2,7 @@ services:
   mongo:
     image: mongo:7
     restart: unless-stopped
-    ports: ["27017:27017"]
+    ports: ["127.0.0.1:${MONGO_HOST_PORT:-27018}:27017"]
     volumes: [mongo-data:/data/db]
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.runCommand('ping').ok"]
@@ -13,7 +13,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
     volumes: [redis-data:/data]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -28,14 +28,18 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
-    ports: ["9000:9000", "9001:9001"]
+    ports: ["127.0.0.1:19000:9000", "127.0.0.1:19001:9001"]
     volumes: [minio-data:/data]
 
   api:
     build: ./api
     restart: unless-stopped
     environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      CONNECTOR_ENCRYPTION_KEY: ${CONNECTOR_ENCRYPTION_KEY:-}
+      CONNECTOR_KEY_FILE: /app/data/connector.key
       API_PORT: 3001
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-development-callback-token}
       MONGO_URI: mongodb://mongo:27017/genesis
       REDIS_URL: redis://redis:6379
       AI_SERVICE_URL: http://ai-service:8000
@@ -49,7 +53,8 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:-http://localhost:3001/api/auth/google/callback}
-    ports: ["3001:3001"]
+    volumes: [api-data:/app/data]
+    ports: ["127.0.0.1:3001:3001"]
     depends_on:
       mongo: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -60,13 +65,14 @@ services:
     restart: unless-stopped
     environment:
       MONGO_URI: mongodb://mongo:27017/genesis
-      API_CALLBACK_URL: http://api:3001/internal/agent-events
+      API_CALLBACK_URL: http://api:3001
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-development-callback-token}
       MINIO_ENDPOINT: minio
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       SEARCH_PROVIDER: ${SEARCH_PROVIDER:-duckduckgo}
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     depends_on:
       mongo: {condition: service_healthy}
 
@@ -74,11 +80,13 @@ services:
     build: ./web
     restart: unless-stopped
     environment:
-      VITE_API_URL: http://localhost:3001
-    ports: ["5180:5180"]
+      VITE_API_URL: ""
+      API_PROXY_TARGET: http://api:3001
+    ports: ["127.0.0.1:5180:5180"]
     depends_on: [api]
 
 volumes:
+  api-data:
   mongo-data:
   redis-data:
   minio-data:

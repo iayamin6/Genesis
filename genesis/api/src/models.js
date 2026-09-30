@@ -11,7 +11,7 @@ export const User = model('User', new Schema({
 }));
 
 export const Workspace = model('Workspace', new Schema({
-  name: { type: String, required: true }, idea: { type: String, default: '' }, industry: String,
+  companyWriteLease: { owner: String, expiresAt: Date }, name: { type: String, required: true }, idea: { type: String, default: '' }, industry: String,
   members: [{ userId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, role: { type: String, enum: ['founder', 'co_founder', 'viewer'], required: true } }],
   competitors: [{ name: String, url: String, lastSnapshot: Schema.Types.Mixed, lastCheckedAt: Date }],
   createdAt: { type: Date, default: Date.now }, updatedAt: { type: Date, default: Date.now }
@@ -36,5 +36,5 @@ export const Alert = model('Alert', new Schema({
 }));
 
 export const FinancialSnapshot = model('FinancialSnapshot', new Schema({
-  workspaceId: { type: Schema.Types.ObjectId, ref: 'Workspace', required: true, index: true }, cash: { type: Number, min: 0, required: true }, monthlyRevenue: { type: Number, min: 0, default: 0 }, monthlyExpenses: { type: Number, min: 0, required: true }, recordedAt: { type: Date, default: Date.now }
+  workspaceId: { type: Schema.Types.ObjectId, ref: 'Workspace', required: true, index: true }, currency: { type: String, enum: ['USD', 'EUR', 'GBP', 'BDT', 'CAD', 'AUD', 'INR'] }, cash: { type: Number, min: 0, required: true }, monthlyRevenue: { type: Number, min: 0, default: 0 }, monthlyExpenses: { type: Number, min: 0, required: true }, recordedAt: { type: Date, default: Date.now }
 }));
