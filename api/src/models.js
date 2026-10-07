@@ -29,7 +29,7 @@ export const User = model(
   new Schema({
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     name: { type: String, required: true },
-    passwordHash: String,
+    passwordHash: { type: String, select: false },
     googleId: { type: String, unique: true, sparse: true },
     createdAt: { type: Date, default: Date.now },
   }),

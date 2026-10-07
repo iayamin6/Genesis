@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { z } from 'zod';
 import { AgentRun, Workspace } from '../models.js';
 import { requireAuth, workspaceRole } from '../auth.js';
-import { enqueueRun } from '../jobs/queue.js';
+import { enqueueRun, requireQueue } from '../jobs/queue.js';
 
 export const runRouter = Router();
 runRouter.use(requireAuth);
@@ -24,6 +24,7 @@ runRouter.post('/workspaces/:workspaceId/idea-analysis', async (req, res, next) 
     const idempotencyKey = `idea:${workspace.id}:${req.get('Idempotency-Key') || crypto.randomUUID()}`;
     let run = await AgentRun.findOne({ idempotencyKey });
     if (!run) {
+      await requireQueue();
       run = await AgentRun.create({
         workspaceId: workspace._id,
         kind: 'idea_analysis',

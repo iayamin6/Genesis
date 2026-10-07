@@ -1,7 +1,14 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { User } from '../models.js';
-import { comparePassword, hashPassword, tokenFor } from '../auth.js';
+import {
+  comparePassword,
+  hashPassword,
+  publicUser,
+  setSession,
+  clearSession,
+  requireAuth,
+} from '../auth.js';
 
 const credentials = z.object({
   email: z.string().trim().toLowerCase().email(),
@@ -10,7 +17,7 @@ const credentials = z.object({
     .min(8)
     .max(72)
     .refine((v) => Buffer.byteLength(v, 'utf8') <= 72, 'Password must be at most 72 UTF-8 bytes'),
-  name: z.string().min(1).max(120).optional(),
+  name: z.string().trim().min(1).max(120).optional(),
 });
 export const authRouter = Router();
 authRouter.post('/register', async (req, res, next) => {
@@ -24,9 +31,8 @@ authRouter.post('/register', async (req, res, next) => {
       name: input.name,
       passwordHash: await hashPassword(input.password),
     });
-    res
-      .status(201)
-      .json({ token: tokenFor(user), user: { id: user.id, email: user.email, name: user.name } });
+    setSession(res, user);
+    res.status(201).json({ user: publicUser(user) });
   } catch (err) {
     next(err);
   }
@@ -34,11 +40,17 @@ authRouter.post('/register', async (req, res, next) => {
 authRouter.post('/login', async (req, res, next) => {
   try {
     const input = credentials.omit({ name: true }).parse(req.body);
-    const user = await User.findOne({ email: input.email });
+    const user = await User.findOne({ email: input.email }).select('+passwordHash');
     if (!user?.passwordHash || !(await comparePassword(input.password, user.passwordHash)))
       return res.status(401).json({ error: 'Invalid email or password' });
-    res.json({ token: tokenFor(user), user: { id: user.id, email: user.email, name: user.name } });
+    setSession(res, user);
+    res.json({ user: publicUser(user) });
   } catch (err) {
     next(err);
   }
+});
+authRouter.get('/me', requireAuth, (req, res) => res.json({ user: publicUser(req.user) }));
+authRouter.post('/logout', (_req, res) => {
+  clearSession(res);
+  res.json({ ok: true });
 });

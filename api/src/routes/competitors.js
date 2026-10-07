@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Workspace, AgentRun } from '../models.js';
 import { requireAuth, workspaceRole } from '../auth.js';
-import { enqueueRun } from '../jobs/queue.js';
+import { enqueueRun, requireQueue } from '../jobs/queue.js';
 
 export const competitorRouter = Router();
 competitorRouter.use(requireAuth);
@@ -43,6 +43,7 @@ competitorRouter.post('/workspaces/:workspaceId/competitors/digest', async (req,
   const idempotencyKey = `competitor-digest:${workspace.id}:${day}`;
   let run = await AgentRun.findOne({ idempotencyKey });
   if (!run) {
+    await requireQueue();
     run = await AgentRun.create({
       workspaceId: workspace._id,
       kind: 'competitor_digest',

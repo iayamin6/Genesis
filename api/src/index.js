@@ -8,20 +8,21 @@ import cors from 'cors';
 import mongoose from 'mongoose';
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import { readSession } from './auth.js';
 import { log } from './logger.js';
 import { authRouter } from './routes/auth.js';
 import { User, Workspace } from './models.js';
 import { workspaceRouter } from './routes/workspaces.js';
 import { runRouter } from './routes/runs.js';
-import './jobs/queue.js';
+
 import { configureScheduler } from './jobs/scheduler.js';
 import { financialRouter } from './routes/financials.js';
 import { competitorRouter } from './routes/competitors.js';
 import { intelligenceRouter } from './routes/intelligence.js';
 import { configureGoogleOAuth } from './oauth.js';
 
-validateProductionConfig();
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 const defaultOrigins =
   process.env.NODE_ENV === 'production' ? [] : ['http://localhost:5180', 'http://127.0.0.1:5180'];
@@ -30,11 +31,12 @@ const configuredOrigins = (process.env.WEB_ORIGIN || 'http://localhost:5180')
   .map((origin) => origin.trim())
   .filter(Boolean);
 const allowedOrigins = [...new Set([...defaultOrigins, ...configuredOrigins])];
-const allowOrigin = (origin) => !origin || allowedOrigins.includes(origin);
+const allowOrigin = (origin) =>
+  !origin || allowedOrigins.includes(origin) || origin === `https://${process.env.VERCEL_URL}`;
 const corsOptions = {
   origin: (origin, callback) => {
     if (allowOrigin(origin)) return callback(null, true);
-    callback(new Error('Origin not allowed by CORS'));
+    callback(Object.assign(new Error('Request origin is not allowed'), { status: 403 }));
   },
   credentials: true,
 };
@@ -54,14 +56,19 @@ app.use(auditWrites);
 app.use('/api/auth', rateLimit(20));
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
-app.get('/ready', (_req, res) =>
+app.use((req, res, next) => {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !allowOrigin(req.get('origin')))
+    return res.status(403).json({ error: 'Request origin is not allowed' });
+  next();
+});
+app.get(['/ready', '/api/health'], (_req, res) =>
   res
     .status(mongoose.connection.readyState === 1 ? 200 : 503)
     .json({ database: mongoose.connection.readyState === 1 ? 'connected' : 'unavailable' }),
 );
 app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'api' }));
 app.use(wrapRouter(ingestionRouter));
-configureGoogleOAuth(app);
+// OAuth is intentionally deferred; password accounts remain available.
 app.use('/api/auth', wrapRouter(authRouter));
 app.use('/api/workspaces', wrapRouter(workspaceRouter));
 app.use('/api/runs', wrapRouter(runRouter));
@@ -97,23 +104,23 @@ app.post('/internal/agent-events', async (req, res, next) => {
     next(error);
   }
 });
-app.use((err, _req, res, _next) => {
+app.use((err, _req, res, next) => {
+  if (res.headersSent) return next(err);
+  if (err.code === 11000) return res.status(409).json({ error: 'This record already exists' });
   log('api', 'error', 'request_failed', { error: err.message });
-  res
-    .status(err.status || (['ZodError', 'CastError'].includes(err.name) ? 400 : 500))
-    .json({
-      error:
-        err.name === 'ZodError'
-          ? 'Invalid request'
-          : err.status
-            ? err.message
-            : 'Internal server error',
-      details: err.issues,
-    });
+  res.status(err.status || (['ZodError', 'CastError'].includes(err.name) ? 400 : 500)).json({
+    error:
+      err.name === 'ZodError'
+        ? 'Invalid request'
+        : err.status
+          ? err.message
+          : 'Internal server error',
+    details: err.issues,
+  });
 });
 io.use(async (socket, next) => {
   try {
-    const token = socket.handshake.auth?.token;
+    const token = readSession(socket.handshake.headers.cookie) || socket.handshake.auth?.token;
     const payload = jwt.verify(token, process.env.JWT_SECRET || 'development-only-secret', {
       algorithms: ['HS256'],
     });
@@ -139,8 +146,25 @@ io.on('connection', (socket) =>
   }),
 );
 export { app, io };
+let connecting;
+export async function connectDatabase() {
+  validateProductionConfig();
+  if (mongoose.connection.readyState === 1) return;
+  if (!connecting)
+    connecting = mongoose
+      .connect(process.env.MONGO_URI || 'mongodb://localhost:27017/genesis', {
+        serverSelectionTimeoutMS: 5000,
+        maxPoolSize: 10,
+      })
+      .then(() => Promise.all(Object.values(mongoose.models).map((model) => model.init())))
+      .catch((error) => {
+        connecting = null;
+        throw error;
+      });
+  return connecting;
+}
 async function boot() {
-  await mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/genesis');
+  await connectDatabase();
   configureScheduler().catch((error) =>
     log('api', 'warn', 'scheduler_unavailable', { error: error.message }),
   );
@@ -148,10 +172,11 @@ async function boot() {
     log('api', 'info', 'listening', { port: process.env.API_PORT || 3001 }),
   );
 }
-boot().catch((err) => {
-  log('api', 'error', 'boot_failed', { error: err.message });
-  process.exit(1);
-});
+if (!process.env.VERCEL && process.env.NO_LISTEN !== 'true')
+  boot().catch((err) => {
+    log('api', 'error', 'boot_failed', { error: err.message });
+    process.exit(1);
+  });
 
 async function shutdown() {
   server.close();

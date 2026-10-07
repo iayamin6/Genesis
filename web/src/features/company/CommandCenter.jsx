@@ -362,15 +362,7 @@ export default function CommandCenter({ workspace, request, token, view, onNavig
   const latest = data?.latest,
     analysis = latest?.analysis,
     snapshot = latest?.snapshot;
-  const readOnly =
-    workspace.members?.find((m) => {
-      try {
-        const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-        return m.userId === payload.sub;
-      } catch {
-        return false;
-      }
-    })?.role === 'viewer';
+  const readOnly = workspace.members?.find((m) => m.userId === token)?.role === 'viewer';
   const signals = [
     ...(analysis?.risks || []),
     ...(analysis?.customerSignals || []),

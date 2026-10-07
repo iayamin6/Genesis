@@ -7,14 +7,16 @@ import { navigation, pages } from './lib/navigation.js';
 import './founder.css';
 
 const API = import.meta.env.VITE_API_URL ?? '';
-async function request(path, options = {}, token) {
+async function request(path, options = {}, _accountId) {
   let res;
   try {
     res = await fetch(`${API}${path}`, {
       ...options,
+      credentials: 'same-origin',
+      signal: AbortSignal.timeout(20000),
       headers: {
         'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+
         ...options.headers,
       },
     });
@@ -23,13 +25,17 @@ async function request(path, options = {}, token) {
       `Cannot reach the Genesis API at ${API || location.origin}. Start the API service, then try again.`,
     );
   }
-  const data = await res.json();
+  const data = await res
+    .json()
+    .catch(() => ({ error: 'The service is unavailable. Please try again.' }));
   if (!res.ok) {
     const details = data.details
       ?.slice(0, 3)
       .map((issue) => `${issue.path?.join('.') || 'Input'}: ${issue.message}`)
       .join('; ');
-    throw new Error(details || data.error || 'Request failed');
+    const error = new Error(details || data.error || 'Request failed');
+    error.status = res.status;
+    throw error;
   }
   return data;
 }
@@ -38,8 +44,12 @@ function Auth({ onAuthenticated }) {
   const [mode, setMode] = useState('register');
   const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   async function submit(e) {
     e.preventDefault();
+    if (submitting) return;
+    setSubmitting(true);
+    setError('');
     try {
       const result = await request(`/api/auth/${mode}`, {
         method: 'POST',
@@ -48,6 +58,8 @@ function Auth({ onAuthenticated }) {
       onAuthenticated(result);
     } catch (e) {
       setError(e.message);
+    } finally {
+      setSubmitting(false);
     }
   }
   return (
@@ -65,27 +77,39 @@ function Auth({ onAuthenticated }) {
         {mode === 'register' && (
           <input
             placeholder="Your name"
+            aria-label="Your name"
+            autoComplete="name"
+            required
+            maxLength={120}
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
           />
         )}
         <input
           placeholder="Email"
+          aria-label="Email"
+          autoComplete="email"
+          required
           type="email"
           value={form.email}
           onChange={(e) => setForm({ ...form, email: e.target.value })}
         />
         <input
           placeholder="Password (8+ characters)"
+          aria-label="Password"
+          autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
+          required
+          minLength={8}
+          maxLength={72}
           type="password"
           value={form.password}
           onChange={(e) => setForm({ ...form, password: e.target.value })}
         />
         {error && <p className="error">{error}</p>}
-        <button>{mode === 'register' ? 'Start building' : 'Sign in'}</button>
-        <p className="muted">
-          Local preview · Sign in with email. Google sign-in will be configured later.
-        </p>
+        <button disabled={submitting}>
+          {submitting ? 'Please wait…' : mode === 'register' ? 'Start building' : 'Sign in'}
+        </button>
+        <p className="muted">Sign in with email. Your company data is saved to your account.</p>
         <button
           type="button"
           className="link"
@@ -99,22 +123,18 @@ function Auth({ onAuthenticated }) {
 }
 
 function App() {
-  const [session, setSession] = useState(() => {
-    const oauthToken =
-      new URLSearchParams(location.hash.slice(1)).get('token') ||
-      new URLSearchParams(location.search).get('token');
-    if (oauthToken) {
-      const value = { token: oauthToken };
-      localStorage.setItem('genesis-session', JSON.stringify(value));
-      history.replaceState({}, '', location.pathname);
-      return value;
-    }
-    try {
-      return JSON.parse(localStorage.getItem('genesis-session') || 'null');
-    } catch {
-      return null;
-    }
-  });
+  const [session, setSession] = useState(null),
+    [checking, setChecking] = useState(true),
+    [serviceError, setServiceError] = useState('');
+  useEffect(() => {
+    localStorage.removeItem('genesis-session');
+    request('/api/auth/me')
+      .then(setSession)
+      .catch((e) => {
+        if (e.status !== 401) setServiceError(e.message);
+      })
+      .finally(() => setChecking(false));
+  }, []);
   const getView = () => (pages[location.hash.slice(2)] ? location.hash.slice(2) : 'home');
   const [view, setView] = useState(getView),
     [workspaces, setWorkspaces] = useState([]),
@@ -126,7 +146,7 @@ function App() {
     [workspaceName, setWorkspaceName] = useState(''),
     [creating, setCreating] = useState(false),
     [navOpen, setNavOpen] = useState(false);
-  const token = session?.token;
+  const token = session?.user?.id;
   const navigate = (target) => {
     location.hash = `/${target}`;
     setView(target);
@@ -167,16 +187,50 @@ function App() {
     localStorage.setItem('genesis-workspace', workspace._id);
     setRun(null);
     setEvents([]);
-    const socket = io(API, { auth: { token } });
+    if (!import.meta.env.DEV && !import.meta.env.VITE_SOCKET_URL) return;
+    const socket = io(import.meta.env.VITE_SOCKET_URL || API, { withCredentials: true });
     socket.on('connect', () => socket.emit('workspace:join', workspace._id));
     socket.on('agent:progress', (e) => setEvents((old) => [...old, e]));
     return () => socket.close();
   }, [workspace?._id, token]);
+  useEffect(() => {
+    if (!run?._id || !['queued', 'running'].includes(run.status)) return;
+    let active = true;
+    const timer = setInterval(
+      () =>
+        request('/api/runs/' + run._id)
+          .then((value) => {
+            if (active) setRun(value);
+          })
+          .catch(() => {}),
+      5000,
+    );
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [run?._id, run?.status]);
+  if (checking)
+    return (
+      <main className="auth">
+        <p>Opening your account…</p>
+      </main>
+    );
+  if (serviceError)
+    return (
+      <main className="auth">
+        <section>
+          <h1>Temporarily unavailable</h1>
+          <p>{serviceError}</p>
+          <button onClick={() => location.reload()}>Try again</button>
+        </section>
+      </main>
+    );
   if (!session)
     return (
       <Auth
         onAuthenticated={(s) => {
-          localStorage.setItem('genesis-session', JSON.stringify(s));
+          setServiceError('');
           setSession(s);
         }}
       />
@@ -294,9 +348,15 @@ function App() {
           </button>
           <button
             className="account-button"
-            onClick={() => {
-              localStorage.removeItem('genesis-session');
-              setSession(null);
+            onClick={async () => {
+              try {
+                await request('/api/auth/logout', { method: 'POST' });
+                setSession(null);
+                setWorkspace(null);
+                setWorkspaces([]);
+              } catch (e) {
+                setError(e.message);
+              }
             }}
           >
             <span className="owner-avatar">{session.user?.name?.[0] || 'G'}</span>
@@ -322,7 +382,7 @@ function App() {
           </span>
           <div>
             <span className="local-pill">
-              <i /> Local preview
+              <i /> Founder workspace
             </span>
             <a href="#/questions" className="ask-shortcut">
               ✧ Ask Genesis

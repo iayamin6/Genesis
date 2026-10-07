@@ -1,6 +1,12 @@
 import crypto from 'node:crypto';
+import mongoose from 'mongoose';
+const RateBucket = mongoose.model(
+  'RateBucket',
+  new mongoose.Schema({ _id: String, count: Number, expiresAt: { type: Date, expires: 0 } }),
+);
 export function validateProductionConfig() {
   if (process.env.NODE_ENV !== 'production') return;
+  if (!process.env.MONGO_URI) throw new Error('Production requires MONGO_URI');
   for (const key of ['JWT_SECRET', 'INTERNAL_API_TOKEN'])
     if (
       !process.env[key] ||
@@ -22,26 +28,40 @@ export function safeEqual(a, b) {
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
 export function rateLimit(limit = 120, windowMs = 60000) {
-  const clients = new Map();
-  const timer = setInterval(() => {
-    const now = Date.now();
-    for (const [key, v] of clients) if (v.until <= now) clients.delete(key);
-  }, windowMs);
-  timer.unref();
-  return (req, res, next) => {
-    const key = req.ip,
-      now = Date.now();
-    let item = clients.get(key);
-    if (!item || item.until <= now) {
-      if (clients.size >= 10000) return res.status(503).json({ error: 'Server busy; retry later' });
-      item = { count: 0, until: now + windowMs };
-      clients.set(key, item);
+  return async (req, res, next) => {
+    const now = Date.now(),
+      window = Math.floor(now / windowMs);
+    const identity = crypto
+      .createHmac('sha256', process.env.JWT_SECRET || 'local-rate-limit')
+      .update(req.ip || 'unknown')
+      .digest('hex');
+    const key = limit + ':' + windowMs + ':' + window + ':' + identity;
+    try {
+      const update = {
+        $inc: { count: 1 },
+        $setOnInsert: { expiresAt: new Date((window + 2) * windowMs) },
+      };
+      let item;
+      try {
+        item = await RateBucket.findOneAndUpdate({ _id: key }, update, { upsert: true, new: true });
+      } catch (e) {
+        if (e.code !== 11000) throw e;
+        item = await RateBucket.findOneAndUpdate(
+          { _id: key },
+          { $inc: { count: 1 } },
+          { new: true },
+        );
+      }
+      if (item.count > limit) {
+        res.set('Retry-After', String(Math.ceil(((window + 1) * windowMs - now) / 1000)));
+        return res.status(429).json({ error: 'Too many requests; please retry later' });
+      }
+      next();
+    } catch {
+      res
+        .status(503)
+        .json({ error: 'Account security checks are temporarily unavailable. Please retry.' });
     }
-    if (++item.count > limit) {
-      res.set('Retry-After', String(Math.ceil((item.until - now) / 1000)));
-      return res.status(429).json({ error: 'Too many requests; please retry later' });
-    }
-    next();
   };
 }
 export function wrapRouter(router) {
