@@ -20,7 +20,13 @@ The owner explicitly approved a MongoDB Atlas Free cluster for Genesis. The appl
 
 Vercel production variables are configured in project settings: `MONGO_URI`, `JWT_SECRET`, `INTERNAL_API_TOKEN`, `CONNECTOR_ENCRYPTION_KEY`, `WEB_ORIGIN`, and `WORKER_ENABLED=false`. Never place these values in GitHub or a frontend variable. Back up encryption keys separately: changing the connector key prevents existing connector secrets from being decrypted.
 
-Public database network access must be explicitly approved and verified. Free Vercel deployments use changing outbound IPs; do not silently open Atlas network access. TLS and a strong database-scoped credential are required.
+On 2026-10-08 the owner explicitly approved Atlas access from any IPv4 address for Vercel's changing outbound IPs. The Genesis project now permits `0.0.0.0/0`; the endpoint is internet-reachable, not anonymously readable. TLS and the strong Genesis-scoped database credential remain required. Never expose that credential in browser code or GitHub. Revisit a narrower network policy if fixed outbound addresses become available.
+
+## Live verification — 2026-10-08
+
+The production health endpoint returned `200` with `database: connected`. Synthetic test accounts verified registration, secure HTTP-only session cookies, logout, fresh-client login, duplicate-account rejection, saved workspaces and financial snapshots, a four-month runway calculation, account isolation, and rejection of an untrusted request origin. These tests used invented QA data, not founder data. The public page now opens the signup form instead of the account-storage-unavailable screen.
+
+The GitHub-triggered production deployment and GitHub Actions checks passed for commit `b57f8ef`. Database connectivity does not depend on a local computer remaining on. Compass is an optional administrator desktop client, not the database host, and founders do not need it.
 
 ## Background service boundaries
 
