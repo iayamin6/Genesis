@@ -28,6 +28,8 @@ The production health endpoint returned `200` with `database: connected`. Synthe
 
 The GitHub-triggered production deployment and GitHub Actions checks passed for commit `b57f8ef`. Database connectivity does not depend on a local computer remaining on. Compass is an optional administrator desktop client, not the database host, and founders do not need it.
 
+Browser verification also covered registration, sign-out, return login, workspace restoration, importing explicitly synthetic company data, and opening People & delivery. The live dashboard correctly displayed 107 allocated hours against 80 hours of capacity, 27 hours of individual overload, two people above capacity, and one overdue project. These are test fixtures, not claims about any real founder's business. Workload trends correctly remained unknown without an earlier observation.
+
 ## Background service boundaries
 
 The Vercel request handler deliberately does not start Bull workers, sockets or recurring schedulers. Redis and the persistent AI worker still require deployment and configuration for foundation analyses and automated competitor digests. Queue-dependent actions return a clear 503 when this infrastructure is missing, instead of claiming a report is running forever. Deterministic company analysis and manual financial/customer/scenario tools run in the web API and use saved MongoDB data.
