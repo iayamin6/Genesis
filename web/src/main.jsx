@@ -22,7 +22,7 @@ async function request(path, options = {}, _accountId) {
     });
   } catch {
     throw new Error(
-      `Cannot reach the Genesis API at ${API || location.origin}. Start the API service, then try again.`,
+      'Genesis could not connect. Check your connection and try again shortly. Your saved data has not been cleared.',
     );
   }
   const data = await res
@@ -68,8 +68,7 @@ function Auth({ onAuthenticated }) {
         <p className="eyebrow">GENESIS / FOUNDER INTELLIGENCE</p>
         <h1>Make the next decision before it makes you.</h1>
         <p>
-          Grounded startup analysis, live runway, and competitor signals in one self-hosted
-          workspace.
+          Track your cash runway, customer relationships, and company decisions in one workspace.
         </p>
       </section>
       <form onSubmit={submit}>
@@ -414,6 +413,35 @@ function App() {
             {error}
           </p>
         )}
+        {view === 'home' && (
+          <details className="brief-panel" open={!workspace}>
+            <summary>New to Genesis? Start here</summary>
+            <ol>
+              <li>Create a workspace for your company using New workspace.</li>
+              <li>
+                Open <a href="#/scenarios">Runway &amp; scenarios</a> and save your cash, monthly
+                revenue, and monthly expenses in one currency.
+              </li>
+              <li>
+                Add your people, projects, and customers in <a href="#/data">Company records</a>.
+                Save a new observation when they change.
+              </li>
+              <li>
+                Review the <a href="#/home">Founder brief</a>, then turn important signals into
+                actions with an owner and deadline.
+              </li>
+              <li>
+                Return weekly to update your numbers and review your actions and decisions. Sign in
+                with the same email to reopen your saved work.
+              </li>
+            </ol>
+            <p className="muted">
+              Runway is a forecast from your latest manual entries, not a bank balance. Missing data
+              means unknown, not zero risk. Automated AI reports and daily competitor digests
+              require the background services; they are not enabled on this public release.
+            </p>
+          </details>
+        )}
         {creating && (
           <form className="workspace-create" onSubmit={createWorkspace}>
             <label>
@@ -468,8 +496,9 @@ function App() {
                     </button>
                   </form>
                   <p className="muted">
-                    Live model setup is optional. Without a provider, results are explicitly labeled
-                    as fallback output.
+                    Seven-agent reports require a connected AI service and background worker. If
+                    those services are unavailable, Genesis shows an error instead of a completed
+                    report.
                   </p>
                 </div>
                 <div className="brief-panel">
